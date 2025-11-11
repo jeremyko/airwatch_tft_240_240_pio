@@ -59,7 +59,7 @@ void setup(void) {
     display.setTextWrap(false);
 
     display.setTextSize(3);
-    display.setRotation(2);
+    display.setRotation(3);
     // landscape (wide) mode :
     // https://learn.adafruit.com/adafruit-gfx-graphics-library/rotating-the-display
     display.setCursor(0, 0);
@@ -101,6 +101,9 @@ void initBuf() {
 
 // -----------------------------------------------------------------------------
 void displayData() {
+    // Serial.print(oldMsrdtBuf); //degub
+    // Serial.print("/"); //degub
+    // Serial.println(msrdtBuf); // debug
     if (strncmp(oldMsrdtBuf, msrdtBuf, sizeof(msrdtBuf)) != 0) {
         display.fillScreen(ST77XX_BLACK);
         display.setCursor(0, 0);
@@ -224,13 +227,9 @@ void connectWiFi() {
 
 // -----------------------------------------------------------------------------
 bool getDustData() {
+    // Serial.println("invoke getDustData()");
     String jsonData = httpGETRequest();
-    // Serial.println(jsonData);
-    if (strncmp("error", jsonData.c_str(), strlen("error")) == 0) {
-        Serial.println("http error !");
-        return false;
-    }
-    // Serial.println(jsonData);
+    // Serial.println(jsonData); //debug
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, jsonData);
 
@@ -259,7 +258,6 @@ bool getDustData() {
             msrdtBuf[dst++] = msrdtBuf[src];
         }
     }
-    // Serial.println(msrdtBuf); // "202511062200"
     pm10Val = pm10;
     pm25Val = pm25;
     snprintf(pm10Buf, sizeof(pm10Buf), "%d", pm10);
@@ -271,14 +269,13 @@ bool getDustData() {
 // -----------------------------------------------------------------------------
 String httpGETRequest() {
     Serial.println("http request...");
-
-    for (int retryCnt = 0; retryCnt < 5; retryCnt++) {
+    int retryCnt = 0;
+    while (true) {
         WiFiClient client;
         HTTPClient http;
-        http.setConnectTimeout(5000);
+        http.setConnectTimeout(10000);
         http.setTimeout(10000);  // milliseconds
         http.begin(client, API_URL);
-        delay(500);
 
         int httpResponseCode = http.GET();
         String payload = "{}";
@@ -289,10 +286,12 @@ String httpGETRequest() {
                 Serial.println(httpResponseCode);
                 payload = http.getString();
                 http.end();  // Free resources
+                // Serial.println(oldMsrdtBuf); //debug
+                // Serial.println(payload); //debug
                 return payload;
             } else {
-                Serial.printf("-http GET failed, error: %s\n",
-                    http.errorToString(httpResponseCode).c_str());
+                Serial.printf("(%d) http failed : %s\n",
+                    retryCnt, http.errorToString(httpResponseCode).c_str());
                 Serial.println(http.errorToString(httpResponseCode).c_str());
 
                 display.fillScreen(ST77XX_BLACK);
@@ -302,10 +301,11 @@ String httpGETRequest() {
                 display.println(httpResponseCode);
                 display.println(http.errorToString(httpResponseCode).c_str());
                 http.end();  // Free resources
+                memset(oldMsrdtBuf, 0x00, sizeof(oldMsrdtBuf));
             }
         } else {
-            Serial.printf("=http GET failed, error: %s\n",
-                http.errorToString(httpResponseCode).c_str());
+            Serial.printf("(%d) - http failed: %s\n",
+                retryCnt, http.errorToString(httpResponseCode).c_str());
             Serial.println(http.errorToString(httpResponseCode).c_str());
 
             display.fillScreen(ST77XX_BLACK);
@@ -315,12 +315,13 @@ String httpGETRequest() {
             display.println(httpResponseCode);
             display.println(http.errorToString(httpResponseCode).c_str());
             http.end();  // Free resources
+            memset(oldMsrdtBuf, 0x00, sizeof(oldMsrdtBuf));
         }
-        delay(1000);
+        delay(3000);
         Serial.println("Retrying...");
-        display.println("HTTP GET retrying...");
+        display.println("HTTP retrying...");
         continue; //retry
     } //for 
-    memset(oldMsrdtBuf, 0x00, sizeof(oldMsrdtBuf));
-    return "error";
+    // Serial.println("give up !");
+    // return "error";
 }
