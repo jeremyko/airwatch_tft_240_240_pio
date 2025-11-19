@@ -5,7 +5,9 @@ using following public API: https://www.data.go.kr/data/15073861/openapi.do
 http://apis.data.go.kr/B552584/ArpltnInforInqireSvc/getMsrstnAcctoRltmMesureDnsty
 
 ## Screenshot
-![result](/screenshot/esp32-project.jpg)
+![01](/screenshot/esp32-project_01.jpg)
+
+![02](/screenshot/esp32-project_02.jpg)
 
 ## Wiring for ESP32-C3 Super Mini
  
