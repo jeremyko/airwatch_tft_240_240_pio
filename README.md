@@ -9,6 +9,8 @@ http://apis.data.go.kr/B552584/ArpltnInforInqireSvc/getMsrstnAcctoRltmMesureDnst
 
 ![02](/screenshot/esp32-project_02.jpg)
 
+The current time and the elapsed time (in minutes) since the measurement values ​​were obtained are displayed, followed by the measurement values ​​for PM10 and PM2.5.
+
 ## Wiring for ESP32-C3 Super Mini
  
 | ST7789 |   ESP32-C3 Super Mini |
