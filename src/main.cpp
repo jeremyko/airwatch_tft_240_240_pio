@@ -72,6 +72,7 @@ int  g_pm25 = 0;
 int g_min_ago = -1; // 측정된 시간과 현재 시간과의 차이(분)
 int g_current_hour = -1;
 int g_current_minute = -1;
+int g_current_sec = -1;
 int g_reserved_hour = -1; // API 호출 후, 다음 호출할 시간대
 char g_current_mon_day[10]; // month-day 저장용
 char g_current_hour_min[10]; // hour-minute 저장용
@@ -137,50 +138,58 @@ void setup(void) {
     delay(FIVE_MINUTES); // 데이터 출력 완료 상태. loop 처리 전,5분 대기
 }
 
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------- clock task
 // 현재 시간 정보를 표시한다. 
 void clock_task(void* parameter) {
 
     // DLOG("task : core id --> " << xPortGetCoreID()); //0
     uint16_t gray_color = g_tft.color565(128, 128, 128);
     char temp_buf[10];
+    bool is_first = true;
+
     while (true) {
         if (xSemaphoreTake(g_display_mutex, portMAX_DELAY) == pdTRUE) {
             get_current_time();
-            g_tft.fillRect(0, 0, g_tft.width(), 35, ST77XX_BLACK); // 시간 표시 영역만 클리어
-            //----------------------------- 
-            g_tft.setCursor(0, 2);
-            g_tft.setTextSize(3);
-            g_tft.setTextColor(ST77XX_MAGENTA);
-            g_tft.print(g_current_mon_day);
-
-            //----------------------------- 
-            g_tft.setCursor(120, 2);
-            g_tft.setTextSize(4);
-            g_tft.println(g_current_hour_min);
-
-            //----------------------------- ago minute 영역만 클리어
-            g_tft.fillRect(0, 36, 100, 38, ST77XX_BLACK);
-
-            //----------------------------- ago minute 표시
-            g_tft.setCursor(20, 50);
-            g_tft.setTextSize(3);
-            g_tft.setTextColor(gray_color);
-            if (g_min_ago >= 80) {
-                // 너무 오래 지연되는 경우,
-                g_tft.setTextColor(ST77XX_RED);
+            //----------------------------- 매초 빈번하게 갱신 안되게 처리한다
+            bool need_update = false;
+            if (g_current_sec >= 0 && g_current_sec <= 3) {
+                need_update = true;
             }
-            snprintf(temp_buf, sizeof(temp_buf), "%4d", g_min_ago);
-            g_tft.print(temp_buf);
+            if (is_first) {
+                is_first = false;
+                need_update = true;
+            }
 
-            //----------------------------- "MIN AGO" 표시
-            g_tft.setCursor(110, 50);
-            g_tft.setTextSize(3);
-            g_tft.setTextColor(gray_color);
-            g_tft.println("min ago");
+            if (need_update) {
+                g_tft.fillRect(0, 0, g_tft.width(), 15, ST77XX_BLACK); // 시간 표시 ROW 영역 클리어
+                g_tft.setCursor(2, 0);
+                g_tft.setTextSize(2);
+                g_tft.setTextColor(ST77XX_MAGENTA);
+                g_tft.print(g_current_mon_day);
+                g_tft.print(" ");
+                g_tft.println(g_current_hour_min);
+            }
+
+            // g_tft.fillRect(130, 0, 100, 15, ST77XX_YELLOW); // minute 영역만 클리어
+            // 너무 오래 지연되는 경우, delayed minute 표시
+            if (g_min_ago >= 80) {
+                g_tft.fillRoundRect(150, 0, 85, 15, 2, ST77XX_RED); // red box 표시 
+
+                g_tft.setCursor(50, 16);
+                g_tft.setTextColor(ST77XX_RED);
+                snprintf(temp_buf, sizeof(temp_buf), "%4d", g_min_ago);
+                g_tft.print(temp_buf);
+                //----------------------------- 
+                g_tft.setCursor(100, 16);
+                g_tft.println(" min delay");
+            } else {
+                g_tft.fillRoundRect(150, 0, 85, 15, 2, ST77XX_BLACK); // red box 지움
+                g_tft.fillRect(0, 16, g_tft.width(), 15, ST77XX_BLACK); // delay min 표시 ROW 영역 클리어
+            }
+
             xSemaphoreGive(g_display_mutex);
         }
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
@@ -285,6 +294,7 @@ void get_current_time() {
     // g_current_day = timeinfo.tm_mday;
     g_current_hour = timeinfo.tm_hour;
     g_current_minute = timeinfo.tm_min;
+    g_current_sec = timeinfo.tm_sec;
     if (g_current_hour == 0 && get_measured_hour() == 23) {
         // 자정이 넘어간 경우, 측정된 시간이 23시인 경우 고려
         g_min_ago = atoi(g_measure_dt + 10) - g_current_minute;
@@ -311,8 +321,8 @@ void display_data() {
         DLOG("---- display data");
         char imsiBuf[10];
 
-        g_tft.fillScreen(ST77XX_BLACK);
-        g_tft.setCursor(0, 50);
+        // g_tft.fillScreen(ST77XX_BLACK);
+        g_tft.fillRect(0, 30, g_tft.width(), 210, ST77XX_BLACK);
 
         //------------------------------------------------------ line
         // g_tft.drawFastHLine(0, 80, g_tft.width(), gray_color);
@@ -325,7 +335,7 @@ void display_data() {
 
         // label display
         uint16_t pm10_color;
-        g_tft.setCursor(10, 90);
+        g_tft.setCursor(10, 40);
         if (g_pm10 <= 30) {
             pm10_color = ST77XX_BLUE;
             g_tft.setTextColor(ST77XX_WHITE);
@@ -339,13 +349,14 @@ void display_data() {
             pm10_color = ST77XX_RED;
             g_tft.setTextColor(g_tft.color565(255, 224, 143));
         }
-        // g_tft.fillRoundRect(1, 90, 85, 42, 5, pm10_color);
-        g_tft.fillRoundRect(0, 80, g_tft.width(), 75, 8, pm10_color);
+        g_tft.fillRoundRect(0, 32, g_tft.width(), 100, 8, pm10_color); // color box
+
+        g_tft.setCursor(10, 42);
         g_tft.setTextSize(3);
-        g_tft.print("PM10");
+        g_tft.print("PM 10");
 
         // value display
-        g_tft.setCursor(110, 92);
+        g_tft.setCursor(110, 68);
         g_tft.setTextSize(7);
         // if (g_pm10 <= 30) {
         //     g_tft.setTextColor(ST77XX_BLUE);
@@ -370,7 +381,6 @@ void display_data() {
 
         // label display
         uint16_t pm25_color;
-        g_tft.setCursor(10, 170);
         if (g_pm25 <= 15) {
             pm25_color = ST77XX_BLUE;
             g_tft.setTextColor(ST77XX_WHITE);
@@ -385,9 +395,10 @@ void display_data() {
             g_tft.setTextColor(g_tft.color565(255, 224, 143));
         }
         // g_tft.fillRoundRect(1, 170, 85, 42, 5, pm25_color);
-        g_tft.fillRoundRect(0, 160, g_tft.width(), 75, 8, pm25_color);
+        g_tft.fillRoundRect(0, 136, g_tft.width(), 100, 8, pm25_color); //color box
+        g_tft.setCursor(10, 146);
         g_tft.setTextSize(3);
-        g_tft.print("PM25");
+        g_tft.print("PM 2.5");
 
         // value display
         g_tft.setCursor(110, 172);
