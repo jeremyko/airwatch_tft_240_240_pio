@@ -63,6 +63,8 @@ void get_current_time();
 int get_measured_hour();
 void increase_reserved_hour();
 void clock_task(void* parameter);
+void display_time();
+void display_delayed_redbox();
 
 const char* g_ntp_server = "pool.ntp.org";
 const char* g_timezone = "KST-9"; // UTC+9 , south korea
@@ -117,6 +119,7 @@ void setup(void) {
             // API 호출시 매시 정각에 측정 데이터가 즉시 갱신되지 않으므로 체크 필요
             increase_reserved_hour();
         }
+        display_time();
         // 현재 시간 데이터가 아니더라도 최초 한번은 반드시 화면에 표시한다. 
         display_data();
     }
@@ -139,57 +142,66 @@ void setup(void) {
 }
 
 // ----------------------------------------------------------------------------- clock task
-// 현재 시간 정보를 표시한다. 
+// 현재 시간 정보 출력 및 측정값 가져오기가 지연되는 경우 화면 처리  
 void clock_task(void* parameter) {
-
     // DLOG("task : core id --> " << xPortGetCoreID()); //0
     uint16_t gray_color = g_tft.color565(128, 128, 128);
-    char temp_buf[10];
     bool is_first = true;
 
     while (true) {
-        if (xSemaphoreTake(g_display_mutex, portMAX_DELAY) == pdTRUE) {
-            get_current_time();
-            //----------------------------- 매초 빈번하게 갱신 안되게 처리한다
-            bool need_update = false;
-            if (g_current_sec >= 0 && g_current_sec <= 3) {
-                need_update = true;
-            }
-            if (is_first) {
-                is_first = false;
-                need_update = true;
-            }
-
-            if (need_update) {
-                g_tft.fillRect(0, 0, g_tft.width(), 15, ST77XX_BLACK); // 시간 표시 ROW 영역 클리어
-                g_tft.setCursor(2, 0);
-                g_tft.setTextSize(2);
-                g_tft.setTextColor(ST77XX_MAGENTA);
-                g_tft.print(g_current_mon_day);
-                g_tft.print(" ");
-                g_tft.println(g_current_hour_min);
-            }
-
-            // g_tft.fillRect(130, 0, 100, 15, ST77XX_YELLOW); // minute 영역만 클리어
-            // 너무 오래 지연되는 경우, delayed minute 표시
-            if (g_min_ago >= 80) {
-                g_tft.fillRoundRect(150, 0, 85, 15, 2, ST77XX_RED); // red box 표시 
-
-                g_tft.setCursor(50, 16);
-                g_tft.setTextColor(ST77XX_RED);
-                snprintf(temp_buf, sizeof(temp_buf), "%4d", g_min_ago);
-                g_tft.print(temp_buf);
-                //----------------------------- 
-                g_tft.setCursor(100, 16);
-                g_tft.println(" min delay");
-            } else {
-                g_tft.fillRoundRect(150, 0, 85, 15, 2, ST77XX_BLACK); // red box 지움
-                g_tft.fillRect(0, 16, g_tft.width(), 15, ST77XX_BLACK); // delay min 표시 ROW 영역 클리어
-            }
-
-            xSemaphoreGive(g_display_mutex);
+        get_current_time();
+        // 매초 빈번하게 갱신 안되게 처리한다
+        bool need_update = false;
+        if (g_current_sec >= 0 && g_current_sec <= 3) {
+            need_update = true;
         }
+        if (is_first) {
+            is_first = false;
+            need_update = true;
+        }
+        if (need_update) {
+            display_time();
+        }
+        display_delayed_redbox(); //if any
+
         vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+// -----------------------------------------------------------------------------
+void display_time() {
+    if (xSemaphoreTake(g_display_mutex, portMAX_DELAY) == pdTRUE) {
+        g_tft.fillRect(0, 0, g_tft.width(), 15, ST77XX_BLACK); // 시간 표시 ROW 영역 클리어
+        g_tft.setCursor(2, 0);
+        g_tft.setTextSize(2);
+        g_tft.setTextColor(ST77XX_MAGENTA);
+        g_tft.print(g_current_mon_day);
+        g_tft.print(" ");
+        g_tft.println(g_current_hour_min);
+        xSemaphoreGive(g_display_mutex);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 너무 오래 지연되는 경우, delayed minute 표시
+void display_delayed_redbox() {
+    if (xSemaphoreTake(g_display_mutex, portMAX_DELAY) == pdTRUE) {
+        // 너무 오래 지연되는 경우, delayed minute 표시
+        if (g_min_ago >= 80) {
+            g_tft.fillRoundRect(150, 0, 85, 15, 2, ST77XX_RED); // red box 표시 
+            g_tft.setCursor(50, 16);
+            g_tft.setTextColor(ST77XX_RED);
+            char temp_buf[10];
+            snprintf(temp_buf, sizeof(temp_buf), "%4d", g_min_ago);
+            g_tft.print(temp_buf);
+            //----------------------------- 
+            g_tft.setCursor(100, 16);
+            g_tft.println(" min delay");
+        } else {
+            g_tft.fillRoundRect(150, 0, 85, 15, 2, ST77XX_BLACK); // red box 지움
+            g_tft.fillRect(0, 16, g_tft.width(), 15, ST77XX_BLACK); // delay min 표시 ROW 영역 클리어
+        }
+        xSemaphoreGive(g_display_mutex);
     }
 }
 
