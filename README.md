@@ -26,7 +26,7 @@ There was no blueprint or anything from the beginning. It was a kind of 'vibe cr
 ![04](/screenshot/esp32-project_04.jpg)
 
 The current time is displayed, followed by the measurement values ​​for PM10 and PM2.5. 
-Rather than displaying the exact two measurements numerically, I decided it was more important to design the UI so that they could be immediately identified by color. So, I created two large boxes with corresponding colors for each measurement, making them easily identifiable.
+I created two large boxes with corresponding colors for each measurement, making them easily identifiable.
 
 If there is a delay in retrieving measurements by calling the API, a red warning rectangle and message will be displayed next to the current time.
 
