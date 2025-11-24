@@ -39,8 +39,8 @@ If there is a delay in retrieving measurements by calling the API, a red warning
 |-|-|
 | GND    |    GND |
 | VCC    |    3V3 |
-| SCL    |    2   |
-| SDA    |    4   |
+| SCL(SCK)    |    2   |
+| SDA(MOSI)    |    4   |
 | RES    |    0   |
 | DC     |    1   |
 | CS     |    5   |
