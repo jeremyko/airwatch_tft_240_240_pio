@@ -10,13 +10,11 @@
 #include <time.h>
 #include "esp_sntp.h"
 
-#include <thread>
-#include <chrono>
-#include <memory>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <freertos/semphr.h>
+// #include <freertos/semphr.h>
+#include <mutex> 
 
 #include "private_defines.h" 
 
@@ -81,14 +79,11 @@ char g_current_hour_min[10]; // hour-minute 저장용
 bool g_is_data_source_error = false; // api 호출시 "통신장애"로 응답되는 경우
 
 // -----------------------------------------------------------------------------
-// XXX task 에서 g_tft 객체를 사용하고 있으므로, 접근시 mutex 로 보호 필요함 
-SemaphoreHandle_t g_display_mutex;
+std::mutex g_display_mtx;
 Adafruit_ST7789 g_tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);
 
 // -----------------------------------------------------------------------------
 void setup(void) {
-
-    g_display_mutex = xSemaphoreCreateMutex(); // Create the mutex semaphore
 
     Serial.begin(9600);
 
@@ -125,19 +120,15 @@ void setup(void) {
         display_data();
     }
 
-    if (g_display_mutex != NULL) {
-        xTaskCreatePinnedToCore(
-            clock_task,       // Task function
-            "clock_task",     // Name of the task
-            10000,        // Stack size in words (adjust as needed)
-            NULL,         // Parameter to pass to the task
-            1,            // Priority of the task (0 is lowest)
-            NULL,         // Task handle (can be NULL if not needed)
-            0             // Core to run the task on (0 or 1)
-        );
-    } else {
-        ELOG("Failed to create mutex semaphore");
-    }
+    xTaskCreatePinnedToCore(
+        clock_task,       // Task function
+        "clock_task",     // Name of the task
+        10000,        // Stack size in words (adjust as needed)
+        NULL,         // Parameter to pass to the task
+        1,            // Priority of the task (0 is lowest)
+        NULL,         // Task handle (can be NULL if not needed)
+        0             // Core to run the task on (0 or 1)
+    );
 
     delay(FIVE_MINUTES); // 데이터 출력 완료 상태. loop 처리 전,5분 대기
 }
@@ -163,7 +154,9 @@ void clock_task(void* parameter) {
         if (need_update) {
             display_time();
         }
-        display_delayed_redbox(); //if any
+        if (g_min_ago >= 80) {
+            display_delayed_redbox(); //if any
+        }
 
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -171,39 +164,33 @@ void clock_task(void* parameter) {
 
 // -----------------------------------------------------------------------------
 void display_time() {
-    if (xSemaphoreTake(g_display_mutex, portMAX_DELAY) == pdTRUE) {
-        g_tft.fillRect(0, 0, g_tft.width(), 15, ST77XX_BLACK); // 시간 표시 ROW 영역 클리어
-        g_tft.setCursor(2, 0);
-        g_tft.setTextSize(2);
-        g_tft.setTextColor(ST77XX_MAGENTA);
-        g_tft.print(g_current_mon_day);
-        g_tft.print(" ");
-        g_tft.println(g_current_hour_min);
-        xSemaphoreGive(g_display_mutex);
-    }
+    std::lock_guard<std::mutex> lck(g_display_mtx);
+    g_tft.fillRect(0, 0, g_tft.width(), 15, ST77XX_BLACK); // 시간 표시 ROW 영역 클리어
+    g_tft.setCursor(2, 0);
+    g_tft.setTextSize(2);
+    g_tft.setTextColor(ST77XX_MAGENTA);
+    g_tft.print(g_current_mon_day);
+    g_tft.print(" ");
+    g_tft.println(g_current_hour_min);
 }
 
 // -----------------------------------------------------------------------------
 // 너무 오래 지연되는 경우, delayed minute 표시
 void display_delayed_redbox() {
-    if (xSemaphoreTake(g_display_mutex, portMAX_DELAY) == pdTRUE) {
-        // 너무 오래 지연되는 경우, delayed minute 표시
-        if (g_min_ago >= 80) {
-            g_tft.fillRoundRect(150, 0, 85, 15, 2, ST77XX_RED); // red box 표시 
-            g_tft.setCursor(50, 16);
-            g_tft.setTextColor(ST77XX_RED);
-            char temp_buf[10];
-            snprintf(temp_buf, sizeof(temp_buf), "%4d", g_min_ago);
-            g_tft.print(temp_buf);
-            //----------------------------- 
-            g_tft.setCursor(100, 16);
-            g_tft.println(" min delay");
-        } else {
-            g_tft.fillRoundRect(150, 0, 85, 15, 2, ST77XX_BLACK); // red box 지움
-            g_tft.fillRect(0, 16, g_tft.width(), 15, ST77XX_BLACK); // delay min 표시 ROW 영역 클리어
-        }
-        xSemaphoreGive(g_display_mutex);
-    }
+    std::lock_guard<std::mutex> lck(g_display_mtx);
+    // 너무 오래 지연되는 경우, delayed minute 표시
+    g_tft.fillRoundRect(150, 0, 85, 15, 2, ST77XX_BLACK); // red box 지움
+    g_tft.fillRect(0, 16, g_tft.width(), 15, ST77XX_BLACK); // delay min 표시 ROW 영역 클리어
+
+    g_tft.fillRoundRect(150, 0, 85, 15, 2, ST77XX_RED); // red box 표시 
+    g_tft.setCursor(50, 16);
+    g_tft.setTextColor(ST77XX_RED);
+    char temp_buf[10];
+    snprintf(temp_buf, sizeof(temp_buf), "%4d", g_min_ago);
+    g_tft.print(temp_buf);
+    //----------------------------- 
+    g_tft.setCursor(100, 16);
+    g_tft.println(" min delay");
 }
 
 // -----------------------------------------------------------------------------
@@ -330,106 +317,104 @@ void init_mem() {
 // ex) 현재 시간 2025-11-15 00:00 ==> api는 2025-11-14 24:00 형식으로 옴.
 void display_data() {
     uint16_t gray_color = g_tft.color565(128, 128, 128);
-    if (xSemaphoreTake(g_display_mutex, portMAX_DELAY) == pdTRUE) {
-        DLOG("---- display data");
-        char imsiBuf[10];
+    std::lock_guard<std::mutex> lck(g_display_mtx);
+    DLOG("---- display data");
+    char imsiBuf[10];
 
-        // g_tft.fillScreen(ST77XX_BLACK);
-        g_tft.fillRect(0, 30, g_tft.width(), 210, ST77XX_BLACK);
+    // g_tft.fillScreen(ST77XX_BLACK);
+    g_tft.fillRect(0, 30, g_tft.width(), 210, ST77XX_BLACK);
 
-        //------------------------------------------------------ line
-        // g_tft.drawFastHLine(0, 80, g_tft.width(), gray_color);
-        //------------------------------------------------------ pm10
-        // 좋음0~30
-        // 보통31~80
-        // 나쁨81~150
-        // 매우나쁨150 초과
+    //------------------------------------------------------ line
+    // g_tft.drawFastHLine(0, 80, g_tft.width(), gray_color);
+    //------------------------------------------------------ pm10
+    // 좋음0~30
+    // 보통31~80
+    // 나쁨81~150
+    // 매우나쁨150 초과
 
-        // label display
-        uint16_t pm10_color;
-        g_tft.setCursor(10, 40);
-        if (g_pm10 <= 30) {
-            pm10_color = ST77XX_BLUE;
-            g_tft.setTextColor(ST77XX_WHITE);
-        } else if (g_pm10 <= 80) {
-            pm10_color = ST77XX_GREEN; // normal
-            g_tft.setTextColor(ST77XX_BLACK);
-        } else if (g_pm10 <= 150) {
-            pm10_color = ST77XX_ORANGE;
-            g_tft.setTextColor(ST77XX_BLACK);
-        } else {
-            pm10_color = ST77XX_RED;
-            g_tft.setTextColor(g_tft.color565(255, 224, 143));
-        }
-        if (!g_is_data_source_error) {
-            g_tft.fillRoundRect(0, 32, g_tft.width(), 100, 8, pm10_color); // color box
-        }
-
-        g_tft.setCursor(10, 42);
-        g_tft.setTextSize(3);
-        g_tft.print("PM 10");
-
-        // value display
-        if (g_is_data_source_error) {
-            g_tft.setCursor(10, 68);
-            g_tft.setTextSize(5);
-            g_tft.setTextColor(ST77XX_RED);
-            snprintf(imsiBuf, sizeof(imsiBuf), "%s", "COM_ERR");
-        } else {
-            g_tft.setCursor(110, 68);
-            g_tft.setTextSize(7);
-            snprintf(imsiBuf, sizeof(imsiBuf), "%3d", g_pm10);
-        }
-        g_tft.println(imsiBuf);
-
-        //------------------------------------------------------ line
-        // g_tft.drawFastHLine(0, 160, g_tft.width(), gray_color);
-        //------------------------------------------------------ pm25
-        //  0 좋음0~15
-        //  1 보통16~35
-        //  2 나쁨36~75
-        //  3 매우나쁨75 초과
-
-        // label display
-        uint16_t pm25_color;
-        if (g_pm25 <= 15) {
-            pm25_color = ST77XX_BLUE;
-            g_tft.setTextColor(ST77XX_WHITE);
-        } else if (g_pm25 <= 35) {
-            pm25_color = ST77XX_GREEN; // normal
-            g_tft.setTextColor(ST77XX_BLACK);
-        } else if (g_pm25 <= 75) {
-            pm25_color = ST77XX_ORANGE;
-            g_tft.setTextColor(ST77XX_BLACK);
-        } else {
-            pm25_color = ST77XX_RED;
-            g_tft.setTextColor(g_tft.color565(255, 224, 143));
-        }
-        if (!g_is_data_source_error) {
-            // g_tft.fillRoundRect(1, 170, 85, 42, 5, pm25_color);
-            g_tft.fillRoundRect(0, 136, g_tft.width(), 100, 8, pm25_color); //color box
-        }
-        g_tft.setCursor(10, 146);
-        g_tft.setTextSize(3);
-        g_tft.print("PM 2.5");
-
-        // value display
-        if (g_is_data_source_error) {
-            g_tft.setCursor(10, 172);
-            g_tft.setTextSize(5);
-            g_tft.setTextColor(ST77XX_RED);
-            snprintf(imsiBuf, sizeof(imsiBuf), "%s", "COM_ERR");
-        } else {
-            g_tft.setCursor(110, 172);
-            g_tft.setTextSize(7);
-            snprintf(imsiBuf, sizeof(imsiBuf), "%3d", g_pm25);
-        }
-        g_tft.println(imsiBuf);
-
-        //------------------------------------------------------ line
-        // g_tft.drawFastHLine(0, 239, g_tft.width(), gray_color); //XXX
-        xSemaphoreGive(g_display_mutex);
+    // label display
+    uint16_t pm10_color;
+    g_tft.setCursor(10, 40);
+    if (g_pm10 <= 30) {
+        pm10_color = ST77XX_BLUE;
+        g_tft.setTextColor(ST77XX_WHITE);
+    } else if (g_pm10 <= 80) {
+        pm10_color = ST77XX_GREEN; // normal
+        g_tft.setTextColor(ST77XX_BLACK);
+    } else if (g_pm10 <= 150) {
+        pm10_color = ST77XX_ORANGE;
+        g_tft.setTextColor(ST77XX_BLACK);
+    } else {
+        pm10_color = ST77XX_RED;
+        g_tft.setTextColor(g_tft.color565(255, 224, 143));
     }
+    if (!g_is_data_source_error) {
+        g_tft.fillRoundRect(0, 32, g_tft.width(), 100, 8, pm10_color); // color box
+    }
+
+    g_tft.setCursor(10, 42);
+    g_tft.setTextSize(3);
+    g_tft.print("PM 10");
+
+    // value display
+    if (g_is_data_source_error) {
+        g_tft.setCursor(10, 68);
+        g_tft.setTextSize(5);
+        g_tft.setTextColor(ST77XX_RED);
+        snprintf(imsiBuf, sizeof(imsiBuf), "%s", "COM_ERR");
+    } else {
+        g_tft.setCursor(110, 68);
+        g_tft.setTextSize(7);
+        snprintf(imsiBuf, sizeof(imsiBuf), "%3d", g_pm10);
+    }
+    g_tft.println(imsiBuf);
+
+    //------------------------------------------------------ line
+    // g_tft.drawFastHLine(0, 160, g_tft.width(), gray_color);
+    //------------------------------------------------------ pm25
+    //  0 좋음0~15
+    //  1 보통16~35
+    //  2 나쁨36~75
+    //  3 매우나쁨75 초과
+
+    // label display
+    uint16_t pm25_color;
+    if (g_pm25 <= 15) {
+        pm25_color = ST77XX_BLUE;
+        g_tft.setTextColor(ST77XX_WHITE);
+    } else if (g_pm25 <= 35) {
+        pm25_color = ST77XX_GREEN; // normal
+        g_tft.setTextColor(ST77XX_BLACK);
+    } else if (g_pm25 <= 75) {
+        pm25_color = ST77XX_ORANGE;
+        g_tft.setTextColor(ST77XX_BLACK);
+    } else {
+        pm25_color = ST77XX_RED;
+        g_tft.setTextColor(g_tft.color565(255, 224, 143));
+    }
+    if (!g_is_data_source_error) {
+        // g_tft.fillRoundRect(1, 170, 85, 42, 5, pm25_color);
+        g_tft.fillRoundRect(0, 136, g_tft.width(), 100, 8, pm25_color); //color box
+    }
+    g_tft.setCursor(10, 146);
+    g_tft.setTextSize(3);
+    g_tft.print("PM 2.5");
+
+    // value display
+    if (g_is_data_source_error) {
+        g_tft.setCursor(10, 172);
+        g_tft.setTextSize(5);
+        g_tft.setTextColor(ST77XX_RED);
+        snprintf(imsiBuf, sizeof(imsiBuf), "%s", "COM_ERR");
+    } else {
+        g_tft.setCursor(110, 172);
+        g_tft.setTextSize(7);
+        snprintf(imsiBuf, sizeof(imsiBuf), "%3d", g_pm25);
+    }
+    g_tft.println(imsiBuf);
+
+    //------------------------------------------------------ line
+    // g_tft.drawFastHLine(0, 239, g_tft.width(), gray_color); //XXX
 }
 
 // -----------------------------------------------------------------------------
