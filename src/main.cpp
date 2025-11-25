@@ -78,6 +78,7 @@ int g_current_sec = -1;
 int g_reserved_hour = -1; // API 호출 후, 다음 호출할 시간대
 char g_current_mon_day[10]; // month-day 저장용
 char g_current_hour_min[10]; // hour-minute 저장용
+bool g_is_data_source_error = false; // api 호출시 "통신장애"로 응답되는 경우
 
 // -----------------------------------------------------------------------------
 // XXX task 에서 g_tft 객체를 사용하고 있으므로, 접근시 mutex 로 보호 필요함 
@@ -338,7 +339,6 @@ void display_data() {
 
         //------------------------------------------------------ line
         // g_tft.drawFastHLine(0, 80, g_tft.width(), gray_color);
-
         //------------------------------------------------------ pm10
         // 좋음0~30
         // 보통31~80
@@ -361,30 +361,29 @@ void display_data() {
             pm10_color = ST77XX_RED;
             g_tft.setTextColor(g_tft.color565(255, 224, 143));
         }
-        g_tft.fillRoundRect(0, 32, g_tft.width(), 100, 8, pm10_color); // color box
+        if (!g_is_data_source_error) {
+            g_tft.fillRoundRect(0, 32, g_tft.width(), 100, 8, pm10_color); // color box
+        }
 
         g_tft.setCursor(10, 42);
         g_tft.setTextSize(3);
         g_tft.print("PM 10");
 
         // value display
-        g_tft.setCursor(110, 68);
-        g_tft.setTextSize(7);
-        // if (g_pm10 <= 30) {
-        //     g_tft.setTextColor(ST77XX_BLUE);
-        // } else if (g_pm10 <= 80) {
-        //     g_tft.setTextColor(gray_color);
-        // } else if (g_pm10 <= 150) {
-        //     g_tft.setTextColor(ST77XX_ORANGE);
-        // } else {
-        //     g_tft.setTextColor(ST77XX_RED);
-        // }
-        snprintf(imsiBuf, sizeof(imsiBuf), "%3d", g_pm10);
+        if (g_is_data_source_error) {
+            g_tft.setCursor(10, 68);
+            g_tft.setTextSize(5);
+            g_tft.setTextColor(ST77XX_RED);
+            snprintf(imsiBuf, sizeof(imsiBuf), "%s", "COM_ERR");
+        } else {
+            g_tft.setCursor(110, 68);
+            g_tft.setTextSize(7);
+            snprintf(imsiBuf, sizeof(imsiBuf), "%3d", g_pm10);
+        }
         g_tft.println(imsiBuf);
 
         //------------------------------------------------------ line
         // g_tft.drawFastHLine(0, 160, g_tft.width(), gray_color);
-
         //------------------------------------------------------ pm25
         //  0 좋음0~15
         //  1 보통16~35
@@ -406,30 +405,29 @@ void display_data() {
             pm25_color = ST77XX_RED;
             g_tft.setTextColor(g_tft.color565(255, 224, 143));
         }
-        // g_tft.fillRoundRect(1, 170, 85, 42, 5, pm25_color);
-        g_tft.fillRoundRect(0, 136, g_tft.width(), 100, 8, pm25_color); //color box
+        if (!g_is_data_source_error) {
+            // g_tft.fillRoundRect(1, 170, 85, 42, 5, pm25_color);
+            g_tft.fillRoundRect(0, 136, g_tft.width(), 100, 8, pm25_color); //color box
+        }
         g_tft.setCursor(10, 146);
         g_tft.setTextSize(3);
         g_tft.print("PM 2.5");
 
         // value display
-        g_tft.setCursor(110, 172);
-        g_tft.setTextSize(7);
-        // if (g_pm25 <= 15) {
-        //     g_tft.setTextColor(ST77XX_BLUE);
-        // } else if (g_pm25 <= 35) {
-        //     g_tft.setTextColor(gray_color);
-        // } else if (g_pm25 <= 75) {
-        //     g_tft.setTextColor(ST77XX_ORANGE);
-        // } else {
-        //     g_tft.setTextColor(ST77XX_RED);
-        // }
-        snprintf(imsiBuf, sizeof(imsiBuf), "%3d", g_pm25);
+        if (g_is_data_source_error) {
+            g_tft.setCursor(10, 172);
+            g_tft.setTextSize(5);
+            g_tft.setTextColor(ST77XX_RED);
+            snprintf(imsiBuf, sizeof(imsiBuf), "%s", "COM_ERR");
+        } else {
+            g_tft.setCursor(110, 172);
+            g_tft.setTextSize(7);
+            snprintf(imsiBuf, sizeof(imsiBuf), "%3d", g_pm25);
+        }
         g_tft.println(imsiBuf);
 
         //------------------------------------------------------ line
         // g_tft.drawFastHLine(0, 239, g_tft.width(), gray_color); //XXX
-
         xSemaphoreGive(g_display_mutex);
     }
 }
@@ -475,6 +473,8 @@ bool build_dust_data() {
         return false;
     }
 
+    const char* pm10_flag = doc["response"]["body"]["items"][0]["pm10Flag"]; // "통신장애",
+    const char* pm25_flag = doc["response"]["body"]["items"][0]["pm25Flag"];
     // const char* rslt_code = doc["response"]["header"]["resultCode"];
     const char* measure_dt = doc["response"]["body"]["items"][0]["dataTime"]; // "2025-11-06 22:00"
     g_pm10 = doc["response"]["body"]["items"][0]["pm10Value"];
@@ -486,6 +486,15 @@ bool build_dust_data() {
         if (g_measure_dt[src] != ':' && g_measure_dt[src] != '-' && g_measure_dt[src] != ' ') {
             g_measure_dt[dst++] = g_measure_dt[src];
         }
+    }
+
+    g_is_data_source_error = false;
+    if (pm10_flag != 0x00 && strcmp("통신장애", pm10_flag) == 0) {
+        ELOG("pm10 통신장애!");
+        g_is_data_source_error = true;
+    } else if (pm25_flag != 0x00 && strcmp("통신장애", pm25_flag) == 0) {
+        ELOG("pm25 통신장애!");
+        g_is_data_source_error = true;
     }
     return true;
 }
