@@ -153,9 +153,12 @@ void clock_task(void* parameter) {
         }
         if (need_update) {
             display_time();
-        }
-        if (g_min_ago >= 80) {
-            display_delayed_redbox(); //if any
+            if (g_min_ago >= 80) {
+                display_delayed_redbox(); //if any
+            } else {
+                g_tft.fillRoundRect(150, 0, 85, 15, 2, ST77XX_BLACK); // red box 지움
+                g_tft.fillRect(0, 16, g_tft.width(), 15, ST77XX_BLACK); // delay min 표시 ROW 영역 클리어
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(1000));
