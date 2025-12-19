@@ -10,10 +10,8 @@
 #include <time.h>
 #include "esp_sntp.h"
 
-
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-// #include <freertos/semphr.h>
 #include <mutex> 
 
 #include "private_defines.h" 
@@ -51,42 +49,37 @@
 #endif
 #define  ELOG(x)  std::cerr<<LOG_WHERE << x << "\n"
 
-void init_mem();
+enum class ApiCallResult {
+    ApiCallOk,
+    InternalError,
+    CommunicationError,
+    ParseError
+};
+
 void display_data();
+void display_error();
 void connect_wifi();
-bool build_dust_data();
+ApiCallResult build_dust_data();
 String http_get();
 void init_sntp();
-void get_current_time();
-int get_measured_hour();
-void increase_reserved_hour();
+void increase_reserved_hour(int current_hour);
 void clock_task(void* parameter);
-void display_time();
+void display_time(const char* current_month_day, const char* current_hour_min);
 void display_delayed_redbox();
 
-const char* g_ntp_server = "pool.ntp.org";
-const char* g_timezone = "KST-9"; // UTC+9 , south korea
-char g_measure_dt[20];
+// ----------------------------------------------------------------------------- bad global variables
 int  g_pm10 = 0;
 int  g_pm25 = 0;
-int g_min_ago = -1; // 측정된 시간과 현재 시간과의 차이(분)
-int g_current_hour = -1;
-int g_current_minute = -1;
-int g_current_sec = -1;
 int g_reserved_hour = -1; // API 호출 후, 다음 호출할 시간대
-char g_current_mon_day[10]; // month-day 저장용
-char g_current_hour_min[10]; // hour-minute 저장용
-bool g_is_data_source_error = false; // api 호출시 "통신장애"로 응답되는 경우
+int g_min_ago = -1; // 측정된 시간과 현재 시간과의 차이(분)
 
-// -----------------------------------------------------------------------------
 std::mutex g_display_mtx;
 Adafruit_ST7789 g_tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);
 
 // -----------------------------------------------------------------------------
 void setup(void) {
-
     Serial.begin(9600);
-
+    // uint16_t gray_color = g_tft.color565(128, 128, 128);
     g_tft.init(TFT_WIDTH, TFT_HEIGHT);
     g_tft.fillScreen(ST77XX_BLACK);
     g_tft.setTextWrap(false);
@@ -97,7 +90,6 @@ void setup(void) {
     // https://learn.adafruit.com/adafruit-gfx-graphics-library/rotating-the-g_tft
     g_tft.setCursor(0, 0);
 
-    init_mem();
     connect_wifi();
     init_sntp();
 
@@ -106,18 +98,22 @@ void setup(void) {
     gpio_set_direction(GPIO_NUM_8, GPIO_MODE_OUTPUT);
     gpio_set_level(GPIO_NUM_8, 1);
 
-    if (build_dust_data()) { // blocking call 
-        get_current_time(); // 위 함수 호출에서 blocking 된 경우, 현재 hour가 변경될수 있다.
-        DLOG("(setup) API called success : " << g_measure_dt);
-        if (get_measured_hour() == g_current_hour) {
-            // 실제 측정 시간이 현재 시간인 경우 
-            // -> 현 시간의 측정값을 가져온 경우에만 다음 예약 시간을 갱신한다.
-            // API 호출시 매시 정각에 측정 데이터가 즉시 갱신되지 않으므로 체크 필요
-            increase_reserved_hour();
-        }
-        display_time();
-        // 현재 시간 데이터가 아니더라도 최초 한번은 반드시 화면에 표시한다. 
+    ApiCallResult api_result = build_dust_data(); // blocking call 
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo)) {
+        Serial.println("Failed to obtain time");
+        return;
+    }
+    char current_month_day[10];
+    char current_hour_min[10];
+    snprintf(current_month_day, sizeof(current_month_day), "%02d-%02d", timeinfo.tm_mon + 1, timeinfo.tm_mday);
+    snprintf(current_hour_min, sizeof(current_hour_min), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+    display_time(current_month_day, current_hour_min);
+    // 현재 시간 데이터가 아니더라도 화면에 표시. 
+    if (api_result == ApiCallResult::ApiCallOk) {
         display_data();
+    } else {
+        display_error();
     }
 
     xTaskCreatePinnedToCore(
@@ -137,14 +133,23 @@ void setup(void) {
 // 현재 시간 정보 출력 및 측정값 가져오기가 지연되는 경우 화면 처리  
 void clock_task(void* parameter) {
     // DLOG("task : core id --> " << xPortGetCoreID()); //0
-    uint16_t gray_color = g_tft.color565(128, 128, 128);
     bool is_first = true;
 
     while (true) {
-        get_current_time();
+        struct tm timeinfo;
+        if (!getLocalTime(&timeinfo)) {
+            Serial.println("Failed to obtain time");
+            return;
+        }
+        // Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S zone %Z %z ");
+        // g_current_month = timeinfo.tm_mon + 1;
+        int current_hour = timeinfo.tm_hour;
+        int current_minute = timeinfo.tm_min;
+        int current_sec = timeinfo.tm_sec;
+
         // 매초 빈번하게 갱신 안되게 처리한다
         bool need_update = false;
-        if (g_current_sec >= 0 && g_current_sec <= 3) {
+        if (current_sec >= 0 && current_sec <= 3) {
             need_update = true;
         }
         if (is_first) {
@@ -152,10 +157,15 @@ void clock_task(void* parameter) {
             need_update = true;
         }
         if (need_update) {
-            display_time();
+            char current_month_day[10];
+            char current_hour_min[10];
+            snprintf(current_month_day, sizeof(current_month_day), "%02d-%02d", timeinfo.tm_mon + 1, timeinfo.tm_mday);
+            snprintf(current_hour_min, sizeof(current_hour_min), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+            display_time(current_month_day, current_hour_min);
             if (g_min_ago >= 80) {
                 display_delayed_redbox(); //if any
             } else {
+                std::lock_guard<std::mutex> lck(g_display_mtx);
                 g_tft.fillRoundRect(150, 0, 85, 15, 2, ST77XX_BLACK); // red box 지움
                 g_tft.fillRect(0, 16, g_tft.width(), 15, ST77XX_BLACK); // delay min 표시 ROW 영역 클리어
             }
@@ -166,15 +176,15 @@ void clock_task(void* parameter) {
 }
 
 // -----------------------------------------------------------------------------
-void display_time() {
+void display_time(const char* current_month_day, const char* current_hour_min) {
     std::lock_guard<std::mutex> lck(g_display_mtx);
     g_tft.fillRect(0, 0, g_tft.width(), 15, ST77XX_BLACK); // 시간 표시 ROW 영역 클리어
     g_tft.setCursor(2, 0);
     g_tft.setTextSize(2);
     g_tft.setTextColor(ST77XX_MAGENTA);
-    g_tft.print(g_current_mon_day);
+    g_tft.print(current_month_day);
     g_tft.print(" ");
-    g_tft.println(g_current_hour_min);
+    g_tft.println(current_hour_min);
 }
 
 // -----------------------------------------------------------------------------
@@ -201,24 +211,27 @@ void display_delayed_redbox() {
 // 현재 시간 데이터를 가져왔으면 다음 시간까지 호출없게 처리 
 void loop() {
     // DLOG("loop : core id --> " << xPortGetCoreID()); //0
-    get_current_time();
-    DLOG("-- loop current time : " << g_current_hour << ":" << g_current_minute
-        << " / reserved_hour : " << g_reserved_hour);
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo)) {
+        Serial.println("Failed to obtain time");
+        return;
+    }
+    // Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S zone %Z %z ");
+    // g_current_month = timeinfo.tm_mon + 1;
+    int current_hour = timeinfo.tm_hour;
 
-    if (g_reserved_hour == 0 && g_current_hour == 23) {
+    if (g_reserved_hour == 0 && current_hour == 23) {
         // 현재 23시에 0시 예약된 경우 매 5분마다 호출 안되게 처리
         // 이미 23시 데이터는 가져온 상태이므로, 더이상 호출 안함
         delay(FIVE_MINUTES);
         return;
-    } else if (g_reserved_hour <= g_current_hour) {
+    } else if (g_reserved_hour <= current_hour) {
         // 한시간동안 api 호출해도 데이터 얻지 못한경우 고려해서 <= 조건 사용 
-        if (build_dust_data()) { // blocking call 
-            get_current_time(); // 위 함수 호출에서 blocking 된 경우, 현재 hour가 변경될수 있다.
-            DLOG("API called success : " << g_measure_dt);
-            if (get_measured_hour() == g_current_hour) {
-                display_data(); // 화면 갱신
-                increase_reserved_hour();
-            }
+        ApiCallResult api_result = build_dust_data(); // blocking call 
+        if (api_result == ApiCallResult::ApiCallOk) {
+            display_data();
+        } else {
+            display_error();
         }
     }
     // 하루에 500 번만 api 호출가능, 1시간에 20번. 
@@ -226,34 +239,19 @@ void loop() {
 }
 
 // -----------------------------------------------------------------------------
-// 현재 시간 기준, 1 시간 이후로 api 호출 예약
-void increase_reserved_hour() {
-    if (g_current_hour == 23) {
+void increase_reserved_hour(int current_hour) {
+    if (current_hour == 23) {
         g_reserved_hour = 0;
     } else {
-        g_reserved_hour = g_current_hour + 1;
+        g_reserved_hour = current_hour + 1;
     }
     DLOG("   +++ increased reserved_hour:" << g_reserved_hour);
 }
 
 // -----------------------------------------------------------------------------
-int get_measured_hour() {
-    char temp_hour[10];
-    memset(temp_hour, 0x00, sizeof(temp_hour));
-    strncpy(temp_hour, g_measure_dt + 8, 2); // 202511131800
-    int meas_hour = atoi(temp_hour); // 이값은 정확하게 매시간 마다 갱신되지 않는다 
-    if (meas_hour == 24) {
-        // api 호출 시, 측정된 시간값은 1-24 hour 값으로 반환된다.
-        // 실제 시간은 0-23 hour 이므로
-        // 0으로 변경해서 시간 비교할수 있도록 한다.
-        meas_hour = 0;
-    }
-    // DLOG("meas_hour:" << meas_hour);
-    return meas_hour;
-}
-
-// -----------------------------------------------------------------------------
 void init_sntp() {
+    const char* g_timezone = "KST-9"; // UTC+9 , south korea
+    const char* g_ntp_server = "pool.ntp.org";
 
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("WiFi Disconnected");
@@ -287,43 +285,28 @@ void init_sntp() {
 }
 
 // -----------------------------------------------------------------------------
-void get_current_time() {
-    struct tm timeinfo;
-    if (!getLocalTime(&timeinfo)) {
-        Serial.println("Failed to obtain time");
-        return;
-    }
-    // g_current_month = timeinfo.tm_mon + 1;
-    // g_current_day = timeinfo.tm_mday;
-    g_current_hour = timeinfo.tm_hour;
-    g_current_minute = timeinfo.tm_min;
-    g_current_sec = timeinfo.tm_sec;
-    if (g_current_hour == 0 && get_measured_hour() == 23) {
-        // 자정이 넘어간 경우, 측정된 시간이 23시인 경우 고려
-        g_min_ago = atoi(g_measure_dt + 10) - g_current_minute;
-    } else {
-        g_min_ago = (g_current_hour * 60 + g_current_minute) - (get_measured_hour() * 60 + atoi(g_measure_dt + 10));
-    }
-    // Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S zone %Z %z ");
-    snprintf(g_current_mon_day, sizeof(g_current_mon_day), "%02d-%02d", timeinfo.tm_mon + 1, timeinfo.tm_mday);
-    snprintf(g_current_hour_min, sizeof(g_current_hour_min), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
-    // DLOG("-- current time : " << g_current_mon_day << " " << g_current_hour_min << " / min_ago:" << g_min_ago);
-}
+void display_error() {
+    std::lock_guard<std::mutex> lck(g_display_mtx);
+    g_tft.fillRect(0, 30, g_tft.width(), 210, ST77XX_BLACK);
 
-// -----------------------------------------------------------------------------
-void init_mem() {
-    memset(g_measure_dt, 0x00, sizeof(g_measure_dt));
+    g_tft.setCursor(10, 68);
+    g_tft.setTextSize(5);
+    g_tft.setTextColor(ST77XX_RED);
+    g_tft.println("COM_ERR");
+
+    g_tft.setCursor(10, 172);
+    g_tft.setTextSize(5);
+    g_tft.setTextColor(ST77XX_RED);
+    g_tft.println("COM_ERR");
 }
 
 // -----------------------------------------------------------------------------
 // api 호출로 얻은 날자 정보는 자정이 넘어가면 어제 24:00 형식으로 온다.
 // ex) 현재 시간 2025-11-15 00:00 ==> api는 2025-11-14 24:00 형식으로 옴.
 void display_data() {
-    uint16_t gray_color = g_tft.color565(128, 128, 128);
     std::lock_guard<std::mutex> lck(g_display_mtx);
     DLOG("---- display data");
     char imsiBuf[10];
-
     // g_tft.fillScreen(ST77XX_BLACK);
     g_tft.fillRect(0, 30, g_tft.width(), 210, ST77XX_BLACK);
 
@@ -351,25 +334,16 @@ void display_data() {
         pm10_color = ST77XX_RED;
         g_tft.setTextColor(g_tft.color565(255, 224, 143));
     }
-    if (!g_is_data_source_error) {
-        g_tft.fillRoundRect(0, 32, g_tft.width(), 100, 8, pm10_color); // color box
-    }
+    g_tft.fillRoundRect(0, 32, g_tft.width(), 100, 8, pm10_color); // color box
 
     g_tft.setCursor(10, 42);
     g_tft.setTextSize(3);
     g_tft.print("PM 10");
 
     // value display
-    if (g_is_data_source_error) {
-        g_tft.setCursor(10, 68);
-        g_tft.setTextSize(5);
-        g_tft.setTextColor(ST77XX_RED);
-        snprintf(imsiBuf, sizeof(imsiBuf), "%s", "COM_ERR");
-    } else {
-        g_tft.setCursor(110, 68);
-        g_tft.setTextSize(7);
-        snprintf(imsiBuf, sizeof(imsiBuf), "%3d", g_pm10);
-    }
+    g_tft.setCursor(110, 68);
+    g_tft.setTextSize(7);
+    snprintf(imsiBuf, sizeof(imsiBuf), "%3d", g_pm10);
     g_tft.println(imsiBuf);
 
     //------------------------------------------------------ line
@@ -395,25 +369,16 @@ void display_data() {
         pm25_color = ST77XX_RED;
         g_tft.setTextColor(g_tft.color565(255, 224, 143));
     }
-    if (!g_is_data_source_error) {
-        // g_tft.fillRoundRect(1, 170, 85, 42, 5, pm25_color);
-        g_tft.fillRoundRect(0, 136, g_tft.width(), 100, 8, pm25_color); //color box
-    }
+    // g_tft.fillRoundRect(1, 170, 85, 42, 5, pm25_color);
+    g_tft.fillRoundRect(0, 136, g_tft.width(), 100, 8, pm25_color); //color box
     g_tft.setCursor(10, 146);
     g_tft.setTextSize(3);
     g_tft.print("PM 2.5");
 
     // value display
-    if (g_is_data_source_error) {
-        g_tft.setCursor(10, 172);
-        g_tft.setTextSize(5);
-        g_tft.setTextColor(ST77XX_RED);
-        snprintf(imsiBuf, sizeof(imsiBuf), "%s", "COM_ERR");
-    } else {
-        g_tft.setCursor(110, 172);
-        g_tft.setTextSize(7);
-        snprintf(imsiBuf, sizeof(imsiBuf), "%3d", g_pm25);
-    }
+    g_tft.setCursor(110, 172);
+    g_tft.setTextSize(7);
+    snprintf(imsiBuf, sizeof(imsiBuf), "%3d", g_pm25);
     g_tft.println(imsiBuf);
 
     //------------------------------------------------------ line
@@ -423,32 +388,19 @@ void display_data() {
 // -----------------------------------------------------------------------------
 void connect_wifi() {
     WiFi.begin(WIFI_SSID, WIFI_PASSWD);
-
     Serial.println("Connecting ");
-
     while (WiFi.status() != WL_CONNECTED) {
         delay(500);
         Serial.print(".");
     }
-
     Serial.println("");
     Serial.print("Connected to WiFi network with IP Address: ");
     Serial.println(WiFi.localIP());
 }
 
 // -----------------------------------------------------------------------------
-bool build_dust_data() {
-
-    //----------------------- XXX TEST
-    // g_pm10 = 50;
-    // g_pm25 = 30;
-    // init_mem();
-    // snprintf(g_measure_dt, sizeof(g_measure_dt), "%s", "202511180000");
-    // return true;
-    //-----------------------
-
+ApiCallResult build_dust_data() {
     String jsonData = http_get(); //blocking call
-
     // DLOG(jsonData); 
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, jsonData);
@@ -458,33 +410,73 @@ bool build_dust_data() {
         Serial.println(error.f_str());
         ELOG(error.c_str());
 
-        return false;
+        return ApiCallResult::ParseError;
     }
-
     const char* pm10_flag = doc["response"]["body"]["items"][0]["pm10Flag"]; // "통신장애",
     const char* pm25_flag = doc["response"]["body"]["items"][0]["pm25Flag"];
     // const char* rslt_code = doc["response"]["header"]["resultCode"];
-    const char* measure_dt = doc["response"]["body"]["items"][0]["dataTime"]; // "2025-11-06 22:00"
+    const char* temp_dt = doc["response"]["body"]["items"][0]["dataTime"]; // "2025-11-06 22:00"
     g_pm10 = doc["response"]["body"]["items"][0]["pm10Value"];
     g_pm25 = doc["response"]["body"]["items"][0]["pm25Value"];
 
-    init_mem();
-    snprintf(g_measure_dt, sizeof(g_measure_dt), "%s", measure_dt);
-    for (int src = 0, dst = 0; src < sizeof(g_measure_dt); src++) {
-        if (g_measure_dt[src] != ':' && g_measure_dt[src] != '-' && g_measure_dt[src] != ' ') {
-            g_measure_dt[dst++] = g_measure_dt[src];
+    char measure_dt[20];
+    memset(measure_dt, 0x00, sizeof(measure_dt));
+    snprintf(measure_dt, sizeof(measure_dt), "%s", temp_dt);
+    for (int src = 0, dst = 0; src < sizeof(measure_dt); src++) {
+        if (measure_dt[src] != ':' && measure_dt[src] != '-' && measure_dt[src] != ' ') {
+            measure_dt[dst++] = measure_dt[src];
         }
-    }
+    } // 202511062200
 
-    g_is_data_source_error = false;
     if (pm10_flag != 0x00 && strcmp("통신장애", pm10_flag) == 0) {
         ELOG("pm10 통신장애!");
-        g_is_data_source_error = true;
+        return ApiCallResult::CommunicationError;
     } else if (pm25_flag != 0x00 && strcmp("통신장애", pm25_flag) == 0) {
         ELOG("pm25 통신장애!");
-        g_is_data_source_error = true;
+        return ApiCallResult::CommunicationError;
     }
-    return true;
+    DLOG("API called success : " << measure_dt);
+
+    char temp_hour[10];
+    memset(temp_hour, 0x00, sizeof(temp_hour));
+    strncpy(temp_hour, measure_dt + 8, 2); // 202511131800
+    int meas_hour = meas_hour = atoi(temp_hour); // 마지막으로 측정된 시간 (hour)
+    // -> 이값은 정확하게 매시간 마다 갱신되지 않는다 
+    if (meas_hour == 24) {
+        // api 호출 시, 측정된 시간값은 1-24 hour 값으로 반환된다.
+        // 실제 시간은 0-23 hour 이므로
+        // 0으로 변경해서 시간 비교할수 있도록 한다.
+        meas_hour = 0;
+    }
+    DLOG("meas_hour:" << meas_hour);
+
+    // 위 함수 호출에서 blocking 된 경우, 현재 hour가 변경될수 있다.
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo)) {
+        Serial.println("Failed to obtain time");
+        return ApiCallResult::InternalError;
+    }
+    int current_hour = timeinfo.tm_hour;
+    int current_minute = timeinfo.tm_min;
+    int meas_minute = atoi(measure_dt + 10);
+    if (current_hour == 0 && meas_hour == 23) {
+        // 자정이 넘어간 경우, 측정된 시간이 23시인 경우 고려
+        // 202511062200
+        g_min_ago = meas_minute - current_minute;
+    } else {
+        g_min_ago = (current_hour * 60 + current_minute) - (meas_hour * 60 + meas_minute);
+    }
+
+    if (meas_hour == current_hour) {
+        // 실제 측정 시간이 현재 시간인 경우 
+        display_data(); // 화면 갱신
+        // 현재 시간 기준, 1 시간 이후로 api 호출 예약
+        // -> 현 시간의 측정값을 가져온 경우에만 다음 예약 시간을 갱신한다.
+        // API 호출시 매시 정각에 측정 데이터가 즉시 갱신되지 않으므로 체크 필요
+        increase_reserved_hour(current_hour);
+    }
+
+    return ApiCallResult::ApiCallOk;
 }
 
 // -----------------------------------------------------------------------------
