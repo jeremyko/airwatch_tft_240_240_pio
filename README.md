@@ -60,7 +60,7 @@ You need to apply for an API and receive an authentication key. And for the call
 
 Users must define **Wi-Fi connection information and authentication key values ​​for API** calls in a separate file. This header file is not included in source control.
 
-- First, copy the `private_defines template.h` template file from the include folder and rename it to `private_defines.h`.
+- First, copy the `private_defines_template.h` template file from the include folder and rename it to `private_defines.h`.
 
 - Then, change the `YOURS` part of the file contents to your own information.
     ```cpp
